@@ -135,3 +135,93 @@ v2.6.11
 # test_version_fallback at 26e359ed (from the K5 x86 leg):
 AssertionError: a tree without git metadata reports 2.5.13+g26e359edc1, older than the release 2.6.11 it was exported from
 ```
+
+---
+
+# Part 2: kinetics, photochem, math (taken over from Jiachen 2026-11-22 19:40Z)
+
+Same commit `26e359edc1b28f8bb4f75b13855c663f6e14a6d7`, same method, findings only. Lines: kinetics 4825 (31 files), photochem 3083 (12), math 1691 (13); total 9599.
+
+## Question 1: things defined in more than one place
+
+| id | what | sites file:line@26e359ed | which stays | others become | expected result | net lines |
+|---|---|---|---|---|---|---|
+| K1 | `add_to_vapor_cloud(vapor_set, cloud_set, <X>Options)` is written nine times. Seven are the same loop (look each reactant/product name up in `species_names`, TORCH_CHECK, insert into vapor_set; the third-body ones skip `M`/`(+M)` and also walk `efficiencies()`): arrhenius.cpp:20-40, photolysis.cpp:19-37, lindemann_falloff.cpp:16-40, three_body.cpp:19-43, troe_falloff.cpp:16-40, sri_falloff.cpp:16-40, kb_falloff.cpp:14-30. coagulation.cpp:8-28 is the same loop into cloud_set; evaporation.cpp:22-69 has its own phase logic and stays | the nine sites | one `template <class Opts> void add_reaction_names(std::set<std::string>& into, Opts const& op, bool skip_third_body, bool with_efficiencies)` in kinetics_options.cpp (or a small header); the seven copies and coagulation become one-line forwards; evaporation unchanged | bitwise (set bookkeeping only; error text kept) | ≈ −140 |
+| K2 | `static void parse_arrhenius_params(node, sum_stoich, us, A, b, Ea_R)` is copied verbatim into four files | lindemann_falloff.cpp:42-77, three_body.cpp:44-79, troe_falloff.cpp:42-77, sri_falloff.cpp:42-77 | one definition in a shared header (e.g. kinetics/rate_parsing.hpp) | the three other copies are deleted | bitwise | −108 |
+| K2b | inside it the activation-energy unit conversion is hand constants: `Ea_R = ea / 1.987` (cal), `ea * 1000 / 8.314` (kJ), `ea / 8.314` (J), while the library's gas constant is `constants::Rgas = 8.31446` (src/constants.h:6) and the Arrhenius reader takes `Ea_R` directly (arrhenius.cpp:94). 8.314 vs 8.31446 is 5.5e-5 relative in Ea_R for kJ/J inputs | the four copies above (one after K2) | `constants::Rgas` (and 1.987 → Rgas/4.184 = 1.98720) | **not bitwise in general**; bitwise for every deck in this repo, which only ever write `Ea: … cal/mol` (tests/sample_reaction_full.yaml:41-48, tests/test_falloff.cpp:732-738; `grep -rn "Ea:" data examples tests python`), and 1.987 → 1.98720 would move those by 1.0e-4 relative in Ea_R. Lane X's call; not counted | 0 |
+| K3 | the third-body/falloff family is one class written four times: three_body.cpp (250 lines), lindemann_falloff.cpp (269), troe_falloff.cpp (334), sri_falloff.cpp (338) differ by 103 / 103 / 106 `diff` lines pairwise and share, line for line: the `from_yaml` skeleton (equation, sum_stoich, low/high-P rate parsing, efficiencies map, the push_backs; lindemann 79-137, three_body 81-125, troe 79-147, sri 79-149), the efficiency-matrix build in `reset` (lindemann 145-183, three_body 132-163, troe 154-201, sri 156-205), the efficiencies loop of `pretty_print`, `compute_k0`/`compute_kinf` (the same Arrhenius expression 7 times), and `forward`'s M_eff contraction + `Pr = k0*M_eff/kinf.clamp(1e-100)` (lindemann 221-267, three_body 193-250, troe 283-334, sri 287-338) | one `ThirdBodyRateImpl` base: shared options reader for k0/kinf/efficiencies, `reset` builds `efficiency_matrix`, `forward` computes M_eff, k0, kinf, Pr and calls a virtual `falloff_factor(T, Pr)` (Lindemann: 1; Troe: its 243-283; SRI: its 247-286; three-body: returns k0·M_eff) | the four .cpp files keep only their factor and yaml keys | bitwise if the shared `forward` keeps `k0 * M_eff / (1.0 + Pr)` then `* F` in that order, as all four do now | ≈ −500 of the 1,191 |
+| K3b | the expanded-layout test in `forward` differs: three_body.cpp:209-212 requires `C.dim() >= 3 && C.size(-1) == nreaction && C.size(-2) == nspecies_full` (its comment explains why), the other three test only `C.dim() >= 2 && C.size(-1) == nreaction` (lindemann 239, troe 301, sri 305) | three_body's test | the three weaker tests | **moves results only for a deck with nspecies == nreaction on the plain (…, nspecies) path**, where the weak test misreads the layout; nothing in-tree hits it. Fold into K3 with that note | 0 |
+| K4 | `mask_shape` is built and never used in both falloff factors | troe_falloff.cpp:265-269, sri_falloff.cpp:269-273 | — | deleted | bitwise (dead locals) | −10 |
+| K5 | the "push this species' thermo data" block (cref_R, uref_R, sref_R, nasa9_low/high/Tmid, names, mu) is written six times across the two halves | kinetics_options.cpp:163-170 and 189-196; photochem/kinetics_base_reader.cpp:1236-1243 and 1371-1378; thermo_options.cpp:218-227 and 244-253 (part 1's R9) | one `append_species_thermo(SpeciesThermo&, int id)` next to `populate_thermo` in species.cpp | six one-line calls | bitwise | −40 (replaces R9's −8) |
+| K6 | the `build_side_key` lambda is written twice in the reader | kinetics_base_reader.cpp:1503-1515 and 1601-1613 (`build_side_key2`) | one static function | the second lambda goes | bitwise | −13 |
+| K7 | the three-body and Lindemann constructions from `master.thermal` repeat the equation formatting, sum_stoich and unit strings | kinetics_base_reader.cpp:1166-1189 and 1192-1224 | one helper returning (reaction, unit_low, unit_high) | both loops call it | bitwise | −15 |
+| K8 | the `extern std::vector<…> species_*` blocks of kinetics_options.cpp:10-15, photochem.cpp:9-14 and kinetics_base_reader.cpp:25-33 | — | part 1's R2 (species.hpp declares all ten) | — | bitwise | counted in R2 (−17) |
+
+## Question 2: what else can be cut
+
+| id | what | sites file:line@26e359ed | which stays | others become | expected result | net lines |
+|---|---|---|---|---|---|---|
+| KC1 | `src/math/leastsq.h`: no includer, `leastsq` has no caller (the solvers use leastsq_kkt.h) | src/math/leastsq.h:1-58 | leastsq_kkt.h | deleted | bitwise | −58 |
+| KC2 | `src/math/luminv.h`: no includer, `luminv` has no caller | src/math/luminv.h:1-42 | — | deleted | bitwise | −42 |
+| KC3 | `src/kinetics/jacobian_kinetics.hpp` declares `jacobian_mass_action` and `jacobian_evaporation`, which are defined nowhere (`grep -rn` over src, python, tests finds only the declarations); its only includer, tests/test_ch4_photolysis.cpp:11, uses `jacobian_photolysis_species` from photochem/jacobian_photolysis.hpp, which this header merely includes at its end | src/kinetics/jacobian_kinetics.hpp:1-25; tests/test_ch4_photolysis.cpp:11 | photochem/jacobian_photolysis.hpp | the header is deleted; the test includes photochem/jacobian_photolysis.hpp | bitwise | −25 |
+| KC4 | test-only library code: `RateConstant` (src/kinetics/rate_constant.{hpp,cpp}, 142 lines) is used only by tests/test_kinetics_rates.cpp:34 and tests/test_yaml_parse.cpp:30; `species_rate` (src/kinetics/species_rate.hpp, 20) only by tests/test_kinetics_rates.cpp. With part 1's `parse_reactions_yaml` (C7, 125) these three are the whole path those two tests exercise; no production or Python caller | the two tests | cut all three with the two tests, or keep as tested utilities; lane X's decision, not counted | bitwise either way | −287 if cut |
+| KC5 | `mvdot_t` in math/core.h has no caller (`norm2` next to it is used at core.h:56) | src/math/core.h:90-99 | — | deleted | bitwise | −10 |
+| KC6 | checked and kept: `src/math/sparse_solver.{cu,hpp}` looks orphaned from C++ (only its own .cu includes the header) but `kintera_cuda_csr_solve_cusolver` is resolved by `dlsym` in python/csrc/pysparsesolver.cpp:27 and used by python/atm2d/solver.py:29. Not dead | — | — | — | 0 |
+
+Part 2 counted total (K1, K2, K3, K4, K5, K6, K7, KC1, KC2, KC3, KC5; expected bitwise): about −960, of which K3 is the one estimate (the base class). With lane X's decisions (KC4): −1,247. K2b and K3b are correctness/consistency items that move results and are listed for a ruling, not counted.
+
+Not audited in depth: kinetics.cpp's `jacobian` (318-468) and `forward_with_rate_constants`, evolve_implicit (impl.h, the two dispatches), photolysis.cpp's cross-section interpolation, kinetics_base_reader.cpp's 1,100 lines of static parsers (every one is referenced from inside the file), actinic_flux.hpp, leastsq_kkt.h, psolve.h, constrained_newton.h. Not run: nothing built or tested; the bitwise calls are predictions to be checked row by row.
+
+## Appendix 2: commands and outputs
+
+```
+$ for d in kinetics photochem math; do printf "%-10s %6d lines %3d files\n" $d $(find src/$d -type f | xargs cat | wc -l) $(find src/$d -type f | wc -l); done
+kinetics     4825 lines  31 files
+photochem    3083 lines  12 files
+math         1691 lines  13 files
+
+# include graph (aam/kaudit/includes.py), headers with no includer:
+src/math/leastsq.h          0
+src/math/luminv.h           0
+src/kinetics/jacobian_kinetics.hpp   1  tests/test_ch4_photolysis.cpp
+src/kinetics/species_rate.hpp        1  tests/test_kinetics_rates.cpp
+src/kinetics/rate_constant.hpp       3  src/kinetics/rate_constant.cpp, tests/test_kinetics_rates.cpp, tests/test_yaml_parse.cpp
+src/math/sparse_solver.hpp           1  src/math/sparse_solver.cu
+
+$ grep -rn "jacobian_mass_action\|jacobian_evaporation" src python tests | grep -v src/kinetics/jacobian_kinetics.hpp
+(none)
+$ grep -rn "csr_solve" src python tests | grep -v src/math/sparse_solver
+python/atm2d/solver.py:29:        from ..kintera import cuda_csr_solve_cusolver
+python/csrc/pysparsesolver.cpp:27:    void* symbol = dlsym(RTLD_DEFAULT, "kintera_cuda_csr_solve_cusolver");
+$ grep -rn "RateConstant\b" src python tests | grep -v src/kinetics/rate_constant
+tests/test_kinetics_rates.cpp:34:    auto rate_constant = kintera::RateConstant(rop);
+tests/test_yaml_parse.cpp:30:    auto rate_constant = kintera::RateConstant(rop);
+$ grep -rnw "leastsq\|luminv\|mvdot_t" src python tests | grep -v "src/math/leastsq.h\|src/math/luminv.h\|src/math/core.h" | grep -v leastsq_kkt
+(none)
+
+$ for pat in add_to_vapor_cloud parse_arrhenius_params 8.314 1.987 "efficiency_matrix = register_buffer" M_eff; do printf "%-36s " "$pat"; grep -rl -- "$pat" src/kinetics src/photochem | tr '\n' ' '; echo; done
+add_to_vapor_cloud      arrhenius, coagulation, evaporation, kb_falloff, lindemann_falloff, three_body, troe_falloff, sri_falloff (.cpp and .hpp each), photolysis.cpp/.hpp, kinetics_options.cpp
+parse_arrhenius_params  lindemann_falloff.cpp sri_falloff.cpp three_body.cpp troe_falloff.cpp
+8.314                   lindemann_falloff.cpp troe_falloff.cpp three_body.cpp sri_falloff.cpp
+1.987                   three_body.cpp sri_falloff.cpp lindemann_falloff.cpp troe_falloff.cpp
+efficiency_matrix = register_buffer  lindemann_falloff.cpp sri_falloff.cpp troe_falloff.cpp three_body.cpp
+M_eff                   lindemann_falloff.cpp troe_falloff.cpp sri_falloff.cpp three_body.cpp
+$ diff src/kinetics/lindemann_falloff.cpp src/kinetics/troe_falloff.cpp | grep -c '^[<>]'   # 103
+$ diff src/kinetics/three_body.cpp src/kinetics/lindemann_falloff.cpp | grep -c '^[<>]'     # 103
+$ diff src/kinetics/sri_falloff.cpp src/kinetics/troe_falloff.cpp | grep -c '^[<>]'         # 106
+$ grep -n "mask_shape" src/kinetics/troe_falloff.cpp src/kinetics/sri_falloff.cpp
+troe_falloff.cpp:265,267,269; sri_falloff.cpp:269,271,273   (declared, pushed, never read)
+$ grep -n "has_reaction_axis\|C.dim() >= 2" src/kinetics/{three_body,lindemann_falloff,troe_falloff,sri_falloff}.cpp
+three_body.cpp:209  bool has_reaction_axis = (dim >= 3 && size(-1) == nreaction && size(-2) == nspecies_full)
+lindemann_falloff.cpp:239, troe_falloff.cpp:301, sri_falloff.cpp:305:  if (C.dim() >= 2 && C.size(-1) == nreaction)
+$ grep -rn "Ea:" data examples tests python | grep -iE "cal|kJ|J\b"
+tests/sample_reaction_full.yaml:41-48 and tests/test_falloff.cpp:732-738: all "cal/mol"; no kJ or J deck in the repo
+
+# identical >=6-line blocks (aam/kaudit/dupblocks.py), the largest:
+  17 lines  sri_falloff.cpp:160-171 == troe_falloff.cpp:158-169 == lindemann_falloff.cpp:149-160   (efficiency matrix)
+  13 lines  kinetics_base_reader.cpp:1503-1510 == :1601-1608                                        (build_side_key)
+  11 lines  three_body.cpp:58-63 == troe:56-61 == lindemann:56-61 == sri:56-61                      (parse_arrhenius_params)
+  11 lines  three_body.cpp:173-178 == troe:218-223 == lindemann:196-201 == sri:222-227              (pretty_print efficiencies)
+  10 lines  kinetics_base_reader.cpp:1236-1240 == :1371-1375 == kinetics_options.cpp:163-166 == :189-192 (species thermo push)
+  10 lines  three_body.cpp:147-151 == troe:185-189 == lindemann:167-171 == sri:189-193              (reset)
+```
