@@ -395,6 +395,14 @@ class ThermoXImpl : public torch::nn::Cloneable<ThermoXImpl> {
                         torch::Tensor xfrac, ExtrapOptions const& opts);
 
   //! the same to a new height
+  //! the rain-out entropy target of extrapolate_dlnp / extrapolate_dz
+  //! (extrapolate_ad.cpp); removes the clouds from xfrac in place
+  torch::Tensor rainout_entropy_target(torch::Tensor temp, torch::Tensor pres,
+                                       torch::Tensor xfrac,
+                                       torch::Tensor const& x_dry0,
+                                       torch::Tensor const& entropy_mole0,
+                                       double ds_term, int ngas, int ncloud);
+
   void extrapolate_dz(torch::Tensor temp, torch::Tensor pres,
                       torch::Tensor xfrac, ExtrapOptions const& opts);
 
