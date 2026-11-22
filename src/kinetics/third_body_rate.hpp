@@ -81,6 +81,15 @@ inline torch::Tensor arrhenius_rate(torch::Tensor const& A,
   return A * (T / Tref).pow(b) * torch::exp(-Ea_R / T);
 }
 
+//! True when C carries KineticsImpl's expanded (..., nspecies, nreaction)
+//! layout: both trailing sizes must match, so a plain (..., nspecies)
+//! concentration whose nspecies happens to equal nreaction is not mistaken
+//! for it.
+inline bool expanded_layout(torch::Tensor const& C, int nreaction,
+                            int nspecies_full) {
+  return C.dim() >= 3 && C.size(-1) == nreaction && C.size(-2) == nspecies_full;
+}
+
 //! The effective third-body concentration [M]_eff of every reaction.
 //! C is (..., nspecies), contracted with the efficiency matrix, or, when
 //! `expanded`, (..., nspecies, nreaction): KineticsImpl expands the

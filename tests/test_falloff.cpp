@@ -332,6 +332,56 @@ TEST_P(FalloffEndToEndTest, forward_falloff_lindemann) {
   EXPECT_GT(torch::sum(torch::abs(result)).item<double>(), 0.0);
 }
 
+TEST_P(FalloffEndToEndTest, plain_layout_when_nspecies_equals_nreaction) {
+  // Two species and two reactions: a plain (ncol, nspecies) concentration
+  // has C.size(-1) == nreaction, which must not be read as KineticsImpl's
+  // expanded (..., nspecies, nreaction) layout (that needs dim >= 3 and
+  // both trailing sizes to match). The rate is k0 M / (1 + k0 M / kinf)
+  // with M the efficiency-weighted concentration sum, per column.
+  kintera::species_names = {"H2O2", "OH"};
+  std::string yaml_str = R"(
+- equation: H2O2 (+ M) <=> 2 OH (+ M)
+  type: falloff
+  low-P-rate-constant: {A: 2.3e+12, b: -0.9, Ea_R: 0.0}
+  high-P-rate-constant: {A: 7.4e+10, b: -0.37, Ea_R: 0.0}
+  efficiencies: {OH: 2.0}
+- equation: 2 OH (+ M) <=> H2O2 (+ M)
+  type: falloff
+  low-P-rate-constant: {A: 1.1e+12, b: -0.5, Ea_R: 0.0}
+  high-P-rate-constant: {A: 3.7e+10, b: -0.2, Ea_R: 0.0}
+)";
+  auto opts = LindemannFalloffOptionsImpl::from_yaml(YAML::Load(yaml_str));
+  ASSERT_EQ(opts->reactions().size(), 2);
+  LindemannFalloff module(opts);
+  module->to(device, dtype);
+
+  int ncol = 3;
+  auto temp = torch::tensor({300.0, 400.0, 500.0}, dtype).to(device);
+  auto pres = torch::full({ncol}, 101325.0, dtype).to(device);
+  // The concentrations are scaled so that Pr = k0 [M] / kinf is of order 0.1:
+  // in the high-pressure limit (Pr >> 1) the rate tends to kinf and no longer
+  // depends on [M], and a wrong [M] would go unnoticed.
+  auto conc = torch::tensor(
+                  {{1.0e-3, 2.0e-3}, {3.0e-3, 1.0e-3}, {5.0e-4, 4.0e-3}}, dtype)
+                  .to(device) *
+              1.0e-18;
+  auto k = module->forward(temp, pres, conc, {});
+  ASSERT_EQ(k.sizes(), (std::vector<int64_t>{ncol, 2}));
+
+  auto T = temp.unsqueeze(-1);
+  auto k0 = module->k0_A * (T / opts->Tref()).pow(module->k0_b) *
+            torch::exp(-module->k0_Ea_R / T);
+  auto kinf = module->kinf_A * (T / opts->Tref()).pow(module->kinf_b) *
+              torch::exp(-module->kinf_Ea_R / T);
+  auto M = torch::matmul(conc, module->efficiency_matrix.transpose(0, 1));
+  auto Pr = k0 * M / kinf;
+  auto expected = k0 * M / (1.0 + Pr);
+  EXPECT_LT(Pr.abs().max().item<double>(), 1.0)
+      << "the case must not sit in the high-pressure limit";
+  EXPECT_TRUE(torch::allclose(k, expected, 1e-12, 0.0))
+      << "k = " << k << "\nexpected = " << expected;
+}
+
 TEST_P(FalloffEndToEndTest, forward_falloff_troe) {
   std::string yaml_str = R"(
 - equation: 2 OH (+ M) <=> H2O2 (+ M)
