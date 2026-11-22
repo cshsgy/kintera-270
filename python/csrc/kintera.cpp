@@ -18,15 +18,7 @@
 
 namespace py = pybind11;
 
-namespace kintera {
-
-extern std::vector<std::string> species_names;
-extern std::vector<double> species_weights;
-extern std::vector<double> species_cref_R;
-extern std::vector<double> species_uref_R;
-extern std::vector<double> species_sref_R;
-
-}  // namespace kintera
+namespace kintera {}  // namespace kintera
 
 void bind_thermo(py::module& m);
 void bind_constants(py::module& m);
