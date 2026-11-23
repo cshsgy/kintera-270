@@ -127,6 +127,12 @@ void KineticsImpl::reset() {
     stoich = register_buffer("stoich", stoich_base);
   }
 
+  std::vector<int64_t> ids(options->vapor_ids().begin(),
+                           options->vapor_ids().end());
+  ids.insert(ids.end(), options->cloud_ids().begin(),
+             options->cloud_ids().end());
+  species_ids = torch::tensor(ids, torch::kInt64);
+
   if (options->verbose()) {
     std::cout << "[Kinetics] stoichiometry matrix:\n" << stoich << std::endl;
     if (has_reversible_) {
@@ -502,8 +508,13 @@ KineticsImpl::forward_with_rate_constants(
 
   std::map<std::string, torch::Tensor> other(extra.begin(), extra.end());
   // the rate modules receive conc expanded over the reactions (below); the
-  // third-body ones read this flag rather than guess the layout from shapes
+  // third-body ones read this flag rather than guess the layout from shapes,
+  // and pick their efficiency columns by these registry ids
   other["conc_expanded"] = torch::ones({1}, torch::kBool);
+  if (species_ids.device() != conc.device()) {
+    species_ids = species_ids.to(conc.device());
+  }
+  other["conc_species"] = species_ids;
   other["gas_mask"] =
       torch::arange(conc.size(-1), stoich.options())
           .lt(static_cast<int64_t>(options->vapor_ids().size()));

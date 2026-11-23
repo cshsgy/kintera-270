@@ -94,6 +94,12 @@ class KineticsImpl : public torch::nn::Cloneable<KineticsImpl> {
   //! stoichiometry matrix, shape (nspecies, nreaction)
   torch::Tensor stoich;
 
+  //! registry id of every species in the order of the concentration columns
+  //! (vapor ids, then cloud ids), shape (nspecies,), int64. Not a buffer:
+  //! Module::to(device, dtype) would cast it to the floating dtype; it is
+  //! moved to the concentration's device on first use instead.
+  torch::Tensor species_ids;
+
   //! rate constant evaluator
   std::vector<torch::nn::AnyModule> rc_evaluator;
 
